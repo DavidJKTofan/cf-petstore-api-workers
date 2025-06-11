@@ -185,5 +185,6 @@ petstore-api-keys/self-signed-certificate
 petstore-api-keys/JWT_TOKENS
 petstore-api-keys/temp_tokens/user*
 petstore-api-keys/cloudflare-api-shield-config.json
+cloudflare-api-shield-config.json
 *.log
 *.txt

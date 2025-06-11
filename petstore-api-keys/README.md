@@ -49,12 +49,14 @@ You can create the necessary public and private keys using [mkjwk.org](https://m
    - Key ID (kid): `petstore-ec256` (or your preferred ID)
 3. Click "Generate"
 4. Save the generated keys:
-   - Look for the "Private Key" section and copy the PEM format key
+   - Look for the `Private Key (X.509 PEM Format)` section and copy the PEM format key
    - Save this text to a file named `private-key.pem`
-   - Look for the "Public Key" section and copy the PEM format key
+   - Look for the `Public Key (X.509 PEM Format)` section and copy the PEM format key
    - Save this text to a file named `public-key.pem`
 
 > **IMPORTANT**: Make sure to use the PEM format keys (beginning with `-----BEGIN PRIVATE KEY-----` or `-----BEGIN PUBLIC KEY-----`), not the JSON format.
+
+> Upload the `Public Key` part to Cloudflare's API Shield JWT Validation configuration.
 
 Example of a valid `private-key.pem` file:
 ```

@@ -1,24 +1,21 @@
 {
-    "title": "Pet Store API JWT configuration",
-    "description": "This configuration validates JWT tokens for the Pet Store API",
-    "token_sources": [
-        "http.request.headers[\"authorization\"][0]",
-        "http.request.headers[\"Authorization\"][0]"
-    ],
-    "token_type": "jwt",
-    "credentials": {
-        "keys": [
-            // Only upload this part
-            {
-                "kty": "EC",
-                "d": "RQXu4ME-8wElPm3nJFjP4c6BvIh-2Xm5tcetdqWDVus",
-                "use": "sig",
-                "crv": "P-256",
-                "kid": "petstore-ec256",
-                "x": "JReKhikLOF_--tidE_LEKbedRC_e1LCJs_jLEH7po-U",
-                "y": "ln4VK53svyYDr6HBMBLhyRIWOk9Lp56luMcaaAipQdw",
-                "alg": "ES256"
-            }
-        ]
-    }
+	"title": "Pet Store API JWT configuration",
+	"description": "This configuration validates JWT tokens for the Pet Store API",
+	"token_sources": ["http.request.headers[\"authorization\"][0]", "http.request.headers[\"Authorization\"][0]"],
+	"token_type": "jwt",
+	"credentials": {
+		"keys": [
+			// Only upload this part
+			{
+				"kty": "EC",
+				"d": "XwQRmmLqRdXQtidN09yBCa0lH7ZyMNE5HUCggLl-bAg",
+				"use": "sig",
+				"crv": "P-256",
+				"kid": "petstore-ec256",
+				"x": "_H5rduIUl3vHc7DZe6OCxOUvOjCQO5GE9cXJ3ZDtZlw",
+				"y": "jnGFnugqIKBdVuNQXwyZ1vRmlFdC2jqlBMgaacyT06Q",
+				"alg": "ES256"
+			}
+		]
+	}
 }
