@@ -3,36 +3,75 @@ import httpx
 import random
 import logging
 import time
+import sys
 from typing import List, Dict, Any, Optional
 from collections import defaultdict
+from datetime import datetime
 from fake_useragent import UserAgent
+from dataclasses import dataclass, field
+
+# ANSI color codes for terminal output
+class Colors:
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKCYAN = '\033[96m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+
+class ColoredFormatter(logging.Formatter):
+    """Custom formatter with colors for different log levels"""
+    
+    FORMATS = {
+        logging.DEBUG: Colors.OKCYAN + "%(asctime)s - DEBUG: %(message)s" + Colors.ENDC,
+        logging.INFO: Colors.OKGREEN + "%(asctime)s - INFO: %(message)s" + Colors.ENDC,
+        logging.WARNING: Colors.WARNING + "%(asctime)s - WARNING: %(message)s" + Colors.ENDC,
+        logging.ERROR: Colors.FAIL + "%(asctime)s - ERROR: %(message)s" + Colors.ENDC,
+        logging.CRITICAL: Colors.FAIL + Colors.BOLD + "%(asctime)s - CRITICAL: %(message)s" + Colors.ENDC,
+    }
+
+    def format(self, record):
+        log_fmt = self.FORMATS.get(record.levelno)
+        formatter = logging.Formatter(log_fmt, datefmt='%Y-%m-%d %H:%M:%S')
+        return formatter.format(record)
+
+@dataclass
+class RequestMetrics:
+    """Tracks detailed metrics for requests"""
+    total_requests: int = 0
+    successful_requests: int = 0
+    failed_requests: int = 0
+    endpoint_requests: Dict[str, int] = field(default_factory=lambda: defaultdict(int))
+    endpoint_errors: Dict[str, int] = field(default_factory=lambda: defaultdict(int))
+    status_code_counts: Dict[int, int] = field(default_factory=lambda: defaultdict(int))
+    request_times: List[float] = field(default_factory=list)
+    response_sizes: List[int] = field(default_factory=list)
+    start_time: float = field(default_factory=time.time)
 
 class APITrafficSimulator:
     def __init__(self, 
                  base_url: str, 
                  max_concurrent_requests: int = 10,
-                 timeout: float = 10.0):
+                 timeout: float = 10.0,
+                 realistic_delays: bool = True):
         """
         Initialize the API Traffic Simulator with HTTP/2 support
         
         :param base_url: Base URL of the API
         :param max_concurrent_requests: Maximum number of concurrent requests
         :param timeout: Request timeout in seconds
+        :param realistic_delays: Enable realistic human-like delays between requests
         """
         self.base_url = base_url.rstrip('/')
         self.max_concurrent_requests = max_concurrent_requests
+        self.realistic_delays = realistic_delays
         self.ua = UserAgent()
         
-        # Tracking metrics
-        self.metrics = {
-            'total_requests': 0,
-            'successful_requests': 0,
-            'failed_requests': 0,
-            'endpoint_requests': defaultdict(int),
-            'endpoint_errors': defaultdict(int),
-            'status_code_counts': defaultdict(int),
-            'request_times': []
-        }
+        # Initialize metrics tracker
+        self.metrics = RequestMetrics()
         
         # Define endpoints with metadata
         self.endpoints = {
@@ -49,7 +88,7 @@ class APITrafficSimulator:
             '/photos': {
                 'max_items': 5000,
                 'query_strategy': self._generate_list_strategy('/photos', additional_params={
-                    'albumId': random.randint(1, 10)
+                    'albumId': lambda: random.randint(1, 10)
                 }),
                 'item_strategy': self._generate_item_strategy('/photos')
             },
@@ -62,92 +101,133 @@ class APITrafficSimulator:
                 'max_items': 200,
                 'query_strategy': self._generate_list_strategy('/todos'),
                 'item_strategy': self._generate_item_strategy('/todos')
+            },
+            '/comments': {
+                'max_items': 500,
+                'query_strategy': self._generate_list_strategy('/comments', additional_params={
+                    'postId': lambda: random.randint(1, 100)
+                }),
+                'item_strategy': self._generate_item_strategy('/comments')
             }
         }
         
-        # Configure logging
-        logging.basicConfig(
-            level=logging.INFO, 
-            format='%(asctime)s - %(levelname)s: %(message)s',
-            handlers=[
-                logging.StreamHandler(),
-                logging.FileHandler('api_traffic_simulation.log')
-            ]
-        )
-        self.logger = logging.getLogger(__name__)
+        # Configure logging with colored output
+        self._setup_logging()
         
-        # HTTP/2 client configuration
+        # HTTP/2 client configuration with retry logic
         self.http2_client_limits = httpx.Limits(
             max_connections=max_concurrent_requests,
             max_keepalive_connections=max_concurrent_requests
         )
         self.timeout = httpx.Timeout(timeout)
+        
+        self._print_startup_banner()
+
+    def _setup_logging(self):
+        """Setup logging with both file and colored console output"""
+        self.logger = logging.getLogger(__name__)
+        self.logger.setLevel(logging.INFO)
+        
+        # Clear existing handlers
+        self.logger.handlers.clear()
+        
+        # File handler (without colors)
+        file_handler = logging.FileHandler('api_traffic_simulation.log')
+        file_handler.setLevel(logging.DEBUG)
+        file_formatter = logging.Formatter(
+            '%(asctime)s - %(levelname)s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        file_handler.setFormatter(file_formatter)
+        
+        # Console handler (with colors)
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(logging.INFO)
+        console_handler.setFormatter(ColoredFormatter())
+        
+        self.logger.addHandler(file_handler)
+        self.logger.addHandler(console_handler)
+
+    def _print_startup_banner(self):
+        """Print a colorful startup banner"""
+        banner = f"""
+{Colors.HEADER}{Colors.BOLD}{'='*70}
+   JSON API TRAFFIC SIMULATOR v2.0
+{'='*70}{Colors.ENDC}
+
+{Colors.OKCYAN}Configuration:{Colors.ENDC}
+  • Base URL: {Colors.BOLD}{self.base_url}{Colors.ENDC}
+  • Max Concurrent Requests: {Colors.BOLD}{self.max_concurrent_requests}{Colors.ENDC}
+  • Timeout: {Colors.BOLD}{self.timeout.read}s{Colors.ENDC}
+  • Realistic Delays: {Colors.BOLD}{'Enabled' if self.realistic_delays else 'Disabled'}{Colors.ENDC}
+  • Endpoints: {Colors.BOLD}{len(self.endpoints)}{Colors.ENDC}
+
+{Colors.OKGREEN}Starting simulation...{Colors.ENDC}
+{Colors.HEADER}{'='*70}{Colors.ENDC}
+"""
+        print(banner)
 
     def _generate_list_strategy(self, endpoint: str, additional_params: Optional[Dict[str, Any]] = None) -> callable:
         """
-        Generate a strategy for list endpoint queries
+        Generate a strategy for list endpoint queries with realistic parameters
         
         :param endpoint: Base endpoint
         :param additional_params: Optional additional query parameters
         :return: Query parameter generation function
         """
         def generate_params():
+            # More realistic pagination patterns
+            page_choices = [1, 1, 1, 2, 2, 3]  # Weighted towards first pages
+            limit_choices = [10, 20, 25, 50]  # Common page sizes
+            
             params = {
-                '_page': random.randint(1, 10),
-                '_limit': random.randint(10, 50)
+                '_page': random.choice(page_choices),
+                '_limit': random.choice(limit_choices)
             }
+            
             if additional_params:
-                params.update(additional_params)
+                for key, value in additional_params.items():
+                    # Handle callable values (lambdas)
+                    params[key] = value() if callable(value) else value
+            
             return params
         return generate_params
 
     def _generate_item_strategy(self, endpoint: str) -> callable:
         """
-        Generate a strategy for individual item retrieval
+        Generate a strategy for individual item retrieval with realistic distribution
         
         :param endpoint: Base endpoint
         :return: Item ID generation function
         """
         def generate_item_id():
             max_items = self.endpoints[endpoint]['max_items']
-            return random.randint(1, max_items)
+            # Weighted distribution favoring lower IDs (more popular items)
+            if random.random() < 0.7:
+                return random.randint(1, min(50, max_items))
+            else:
+                return random.randint(1, max_items)
         return generate_item_id
 
-    def generate_summary_report(self) -> str:
-            """
-            Generate a comprehensive summary report of the traffic simulation
-            
-            :return: Formatted summary report
-            """
-            # Calculate summary statistics
-            total_requests = self.metrics['total_requests']
-            successful_requests = self.metrics['successful_requests']
-            failed_requests = self.metrics['failed_requests']
-            success_rate = (successful_requests / total_requests * 100) if total_requests > 0 else 0
-            
-            # Calculate request time statistics
-            request_times = self.metrics['request_times']
-            avg_request_time = sum(request_times) / len(request_times) if request_times else 0
-            
-            # Construct report
-            report = [
-                "=" * 50,
-                "API TRAFFIC SIMULATION - SUMMARY REPORT",
-                "=" * 50,
-                f"Total Requests: {total_requests}",
-                f"Successful Requests: {successful_requests}",
-                f"Failed Requests: {failed_requests}",
-                f"Success Rate: {success_rate:.2f}%",
-                f"Average Request Duration: {avg_request_time:.4f}s",
-                "\nRequest Distribution by Endpoint:",
-                *[f"  {endpoint}: {count} requests" for endpoint, count in self.metrics['endpoint_requests'].items()],
-                "\nError Distribution by Endpoint:",
-                *[f"  {endpoint}: {count} errors" for endpoint, count in self.metrics['endpoint_errors'].items()],
-                "\nStatus Code Breakdown:",
-                *[f"  {code}: {count} requests" for code, count in self.metrics['status_code_counts'].items()],
-                "=" * 50
-            ]  
-            return "\n".join(report)
+    def _get_realistic_delay(self) -> float:
+        """Calculate realistic delay between requests based on human behavior"""
+        if not self.realistic_delays:
+            return random.uniform(0.1, 0.5)
+        
+        # Simulate different user behavior patterns
+        behavior = random.choices(
+            ['quick_browse', 'normal_browse', 'careful_read', 'batch_load'],
+            weights=[0.3, 0.4, 0.2, 0.1]
+        )[0]
+        
+        delays = {
+            'quick_browse': (0.5, 2.0),
+            'normal_browse': (2.0, 5.0),
+            'careful_read': (5.0, 10.0),
+            'batch_load': (0.1, 0.5)
+        }
+        
+        return random.uniform(*delays[behavior])
 
     async def fetch_endpoint(self, session: httpx.AsyncClient, endpoint: str, item_mode: bool = False) -> None:
         """
@@ -159,62 +239,60 @@ class APITrafficSimulator:
         """
         try:
             # Increment total and endpoint-specific request count
-            self.metrics['total_requests'] += 1
-            self.metrics['endpoint_requests'][endpoint] += 1
+            self.metrics.total_requests += 1
+            self.metrics.endpoint_requests[endpoint] += 1
             
             # Determine query strategy
             if item_mode:
-                # Individual item retrieval
                 item_id = self.endpoints[endpoint]['item_strategy']()
                 url = f"{self.base_url}{endpoint}/{item_id}"
                 params = {}
             else:
-                # List endpoint
                 query_strategy = self.endpoints[endpoint]['query_strategy']
                 params = query_strategy()
                 url = f"{self.base_url}{endpoint}"
             
-            # Randomize user agent
+            # Realistic user agent and headers
             headers = {
                 'User-Agent': self.ua.random,
-                'Accept': 'application/json'
+                'Accept': 'application/json',
+                'Accept-Language': random.choice(['en-US,en;q=0.9', 'en-GB,en;q=0.8', 'en-US,en;q=0.5']),
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Connection': 'keep-alive',
+                'Cache-Control': random.choice(['no-cache', 'max-age=0', 'no-store'])
             }
             
-            # Simulate variable request timing
-            await asyncio.sleep(random.uniform(0.1, 1.5))
+            # Realistic delay before request
+            await asyncio.sleep(self._get_realistic_delay())
             
-            # Perform request
+            # Perform request with timing
             start_time = time.time()
-            response = await session.get(
-                url, 
-                params=params, 
-                headers=headers
-            )
-            
-            # Calculate request duration
+            response = await session.get(url, params=params, headers=headers)
             request_duration = time.time() - start_time
-            self.metrics['request_times'].append(request_duration)
             
-            # Track status code
-            self.metrics['status_code_counts'][response.status_code] += 1
+            # Track metrics
+            self.metrics.request_times.append(request_duration)
+            self.metrics.status_code_counts[response.status_code] += 1
+            
+            if response.content:
+                self.metrics.response_sizes.append(len(response.content))
             
             # Log request details
             request_type = "Item" if item_mode else "List"
+            status_color = Colors.OKGREEN if response.status_code == 200 else Colors.WARNING
+            
             if response.status_code == 200:
-                self.metrics['successful_requests'] += 1
+                self.metrics.successful_requests += 1
                 self.logger.info(
-                    f"Successful {request_type} request: {endpoint} "
-                    f"(Status: {response.status_code}, "
-                    f"Duration: {request_duration:.2f}s, "
-                    f"UA: {headers['User-Agent']})"
+                    f"{status_color}✓{Colors.ENDC} {request_type:4} {endpoint:20} "
+                    f"[{response.status_code}] {request_duration*1000:6.1f}ms "
+                    f"({len(response.content):,} bytes)"
                 )
                 
-                # Optional: Parse and validate response
+                # Validate response
                 try:
                     data = response.json()
-                    
-                    # Different validation for list vs item endpoints
-                    if not item_mode:
+                    if not item_mode and isinstance(data, list):
                         item_count = len(data)
                         max_expected = self.endpoints[endpoint]['max_items']
                         
@@ -226,85 +304,281 @@ class APITrafficSimulator:
                 except ValueError:
                     self.logger.error(f"Invalid JSON response for {endpoint}")
             else:
-                # Track failed requests
-                self.metrics['failed_requests'] += 1
-                self.metrics['endpoint_errors'][endpoint] += 1
+                self.metrics.failed_requests += 1
+                self.metrics.endpoint_errors[endpoint] += 1
                 self.logger.warning(
-                    f"Failed {request_type} request: {endpoint} "
-                    f"(Status: {response.status_code})"
+                    f"{Colors.FAIL}✗{Colors.ENDC} {request_type:4} {endpoint:20} "
+                    f"[{response.status_code}] {request_duration*1000:6.1f}ms"
                 )
         
+        except asyncio.TimeoutError:
+            self.metrics.failed_requests += 1
+            self.metrics.endpoint_errors[endpoint] += 1
+            self.logger.error(f"{Colors.FAIL}⚠{Colors.ENDC} Timeout: {endpoint}")
         except Exception as e:
-            # Track exceptions
-            self.metrics['failed_requests'] += 1
-            self.metrics['endpoint_errors'][endpoint] += 1
-            self.logger.error(f"Error fetching {endpoint}: {e}")
+            self.metrics.failed_requests += 1
+            self.metrics.endpoint_errors[endpoint] += 1
+            self.logger.error(f"{Colors.FAIL}⚠{Colors.ENDC} Error fetching {endpoint}: {str(e)[:50]}")
 
-    # ... [rest of the previous implementation remains the same, including generate_summary_report() and simulate_traffic()]
+    def generate_summary_report(self) -> str:
+        """Generate a comprehensive and colorful summary report"""
+        total_requests = self.metrics.total_requests
+        successful_requests = self.metrics.successful_requests
+        failed_requests = self.metrics.failed_requests
+        success_rate = (successful_requests / total_requests * 100) if total_requests > 0 else 0
+        
+        # Calculate statistics
+        request_times = self.metrics.request_times
+        avg_request_time = sum(request_times) / len(request_times) if request_times else 0
+        min_request_time = min(request_times) if request_times else 0
+        max_request_time = max(request_times) if request_times else 0
+        
+        response_sizes = self.metrics.response_sizes
+        avg_response_size = sum(response_sizes) / len(response_sizes) if response_sizes else 0
+        total_data_transferred = sum(response_sizes)
+        
+        # Calculate throughput
+        duration = time.time() - self.metrics.start_time
+        requests_per_second = total_requests / duration if duration > 0 else 0
+        
+        # Build colorful report
+        report_lines = [
+            f"\n{Colors.HEADER}{Colors.BOLD}{'='*70}",
+            f"   API TRAFFIC SIMULATION - SUMMARY REPORT",
+            f"{'='*70}{Colors.ENDC}\n",
+            
+            f"{Colors.OKBLUE}{Colors.BOLD}OVERALL PERFORMANCE{Colors.ENDC}",
+            f"{'─'*70}",
+            f"  Total Requests:        {Colors.BOLD}{total_requests:,}{Colors.ENDC}",
+            f"  Successful:            {Colors.OKGREEN}{successful_requests:,}{Colors.ENDC}",
+            f"  Failed:                {Colors.FAIL}{failed_requests:,}{Colors.ENDC}",
+            f"  Success Rate:          {Colors.BOLD}{success_rate:.2f}%{Colors.ENDC}",
+            f"  Duration:              {Colors.BOLD}{duration:.1f}s{Colors.ENDC}",
+            f"  Throughput:            {Colors.BOLD}{requests_per_second:.2f} req/s{Colors.ENDC}\n",
+            
+            f"{Colors.OKBLUE}{Colors.BOLD}RESPONSE TIMES{Colors.ENDC}",
+            f"{'─'*70}",
+            f"  Average:               {Colors.BOLD}{avg_request_time*1000:.2f}ms{Colors.ENDC}",
+            f"  Minimum:               {Colors.OKGREEN}{min_request_time*1000:.2f}ms{Colors.ENDC}",
+            f"  Maximum:               {Colors.WARNING}{max_request_time*1000:.2f}ms{Colors.ENDC}\n",
+            
+            f"{Colors.OKBLUE}{Colors.BOLD}DATA TRANSFER{Colors.ENDC}",
+            f"{'─'*70}",
+            f"  Total Transferred:     {Colors.BOLD}{total_data_transferred/1024/1024:.2f} MB{Colors.ENDC}",
+            f"  Average Response Size: {Colors.BOLD}{avg_response_size/1024:.2f} KB{Colors.ENDC}\n",
+            
+            f"{Colors.OKBLUE}{Colors.BOLD}REQUEST DISTRIBUTION BY ENDPOINT{Colors.ENDC}",
+            f"{'─'*70}"
+        ]
+        
+        # Add endpoint statistics
+        for endpoint, count in sorted(self.metrics.endpoint_requests.items(), key=lambda x: x[1], reverse=True):
+            percentage = (count / total_requests * 100) if total_requests > 0 else 0
+            errors = self.metrics.endpoint_errors[endpoint]
+            error_rate = (errors / count * 100) if count > 0 else 0
+            
+            status = Colors.OKGREEN if error_rate < 5 else Colors.WARNING if error_rate < 20 else Colors.FAIL
+            report_lines.append(
+                f"  {endpoint:20} {count:5} requests ({percentage:5.1f}%)  "
+                f"{status}{errors:3} errors ({error_rate:4.1f}%){Colors.ENDC}"
+            )
+        
+        # Add status code breakdown
+        report_lines.extend([
+            f"\n{Colors.OKBLUE}{Colors.BOLD}STATUS CODE BREAKDOWN{Colors.ENDC}",
+            f"{'─'*70}"
+        ])
+        
+        for code, count in sorted(self.metrics.status_code_counts.items()):
+            percentage = (count / total_requests * 100) if total_requests > 0 else 0
+            code_color = Colors.OKGREEN if code == 200 else Colors.WARNING if code < 500 else Colors.FAIL
+            report_lines.append(
+                f"  {code_color}HTTP {code}{Colors.ENDC}: {count:5} requests ({percentage:5.1f}%)"
+            )
+        
+        report_lines.extend([
+            f"\n{Colors.HEADER}{Colors.BOLD}{'='*70}{Colors.ENDC}\n"
+        ])
+        
+        return "\n".join(report_lines)
 
-    async def simulate_traffic(
-        self, 
-        duration: int = 300, 
-        request_frequency: float = 2.0
-    ) -> None:
+    async def simulate_traffic(self, duration: int = 300, request_frequency: float = 2.0) -> None:
         """
-        Simulate traffic to API endpoints with HTTP/2
+        Simulate realistic traffic to API endpoints with HTTP/2
         
         :param duration: Total simulation duration in seconds
-        :param request_frequency: Average time between requests per endpoint
+        :param request_frequency: Average time between request batches
         """
-        # Create HTTP/2 compatible client
         async with httpx.AsyncClient(
-            http2=True,  # Enable HTTP/2
+            http2=True,
             limits=self.http2_client_limits,
-            timeout=self.timeout
+            timeout=self.timeout,
+            follow_redirects=True
         ) as session:
             start_time = time.time()
+            self.metrics.start_time = start_time
             
-            while time.time() - start_time < duration:
-                # Randomly select endpoints with weighted probability
-                selected_endpoints = random.choices(
-                    list(self.endpoints.keys()), 
-                    k=random.randint(1, 3)
-                )
-                
-                # Create tasks for selected endpoints
-                tasks = []
-                for endpoint in selected_endpoints:
-                    # Randomly choose between list and item retrieval
-                    modes = [False, True] if random.random() > 0.5 else [False]
-                    tasks.extend([
-                        self.fetch_endpoint(session, endpoint, item_mode) 
-                        for item_mode in modes
-                    ])
-                
-                # Run tasks concurrently
-                await asyncio.gather(*tasks)
-                
-                # Wait before next batch of requests
-                await asyncio.sleep(random.uniform(0.5, request_frequency))
+            self.logger.info(f"Simulation running for {duration} seconds...")
             
-            self.logger.info("Traffic simulation completed")
+            try:
+                while time.time() - start_time < duration:
+                    # Simulate realistic user behavior patterns
+                    behavior = random.choices(
+                        ['browse_multiple', 'deep_dive', 'quick_check', 'search_pattern'],
+                        weights=[0.4, 0.2, 0.3, 0.1]
+                    )[0]
+                    
+                    tasks = []
+                    
+                    if behavior == 'browse_multiple':
+                        # User browsing multiple endpoints
+                        endpoints = random.sample(list(self.endpoints.keys()), k=random.randint(2, 4))
+                        for endpoint in endpoints:
+                            tasks.append(self.fetch_endpoint(session, endpoint, item_mode=False))
+                    
+                    elif behavior == 'deep_dive':
+                        # User exploring specific items
+                        endpoint = random.choice(list(self.endpoints.keys()))
+                        tasks.append(self.fetch_endpoint(session, endpoint, item_mode=False))
+                        for _ in range(random.randint(2, 5)):
+                            tasks.append(self.fetch_endpoint(session, endpoint, item_mode=True))
+                    
+                    elif behavior == 'quick_check':
+                        # Quick single request
+                        endpoint = random.choice(list(self.endpoints.keys()))
+                        tasks.append(self.fetch_endpoint(session, endpoint, item_mode=random.choice([True, False])))
+                    
+                    else:  # search_pattern
+                        # User searching through paginated results
+                        endpoint = random.choice(list(self.endpoints.keys()))
+                        for _ in range(random.randint(3, 6)):
+                            tasks.append(self.fetch_endpoint(session, endpoint, item_mode=False))
+                    
+                    # Execute tasks concurrently
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    
+                    # Realistic wait between batches
+                    await asyncio.sleep(random.uniform(0.5, request_frequency))
+                    
+                    # Progress indicator every 10% of duration
+                    elapsed = time.time() - start_time
+                    progress = (elapsed / duration) * 100
+                    if int(progress) % 10 == 0 and int(progress) > 0:
+                        self.logger.info(
+                            f"{Colors.OKCYAN}Progress: {progress:.0f}% | "
+                            f"Requests: {self.metrics.total_requests} | "
+                            f"Success Rate: {(self.metrics.successful_requests/max(self.metrics.total_requests, 1)*100):.1f}%{Colors.ENDC}"
+                        )
+                
+                self.logger.info(f"{Colors.OKGREEN}{Colors.BOLD}✓ Traffic simulation completed successfully!{Colors.ENDC}")
+                
+            except KeyboardInterrupt:
+                self.logger.warning(f"{Colors.WARNING}Simulation interrupted by user{Colors.ENDC}")
+            except Exception as e:
+                self.logger.error(f"{Colors.FAIL}Simulation error: {e}{Colors.ENDC}")
 
 async def main():
-    base_url = 'https://json.dlsdemo.com'
-    simulator = APITrafficSimulator(base_url)
+    """Main entry point with enhanced configuration"""
+    import argparse
+    
+    parser = argparse.ArgumentParser(
+        description="JSON API Traffic Simulator v2.0",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s -d 300 -r 2.0
+  %(prog)s --url https://api.example.com --duration 600 --concurrent 20
+  %(prog)s -d 120 --no-realistic-delays --debug
+        """
+    )
+    
+    parser.add_argument(
+        '-u', '--url',
+        default='https://json.dlsdemo.com',
+        help='Base URL of the JSON API (default: https://json.dlsdemo.com)'
+    )
+    parser.add_argument(
+        '-d', '--duration',
+        type=int,
+        default=300,
+        help='Simulation duration in seconds (default: 300)'
+    )
+    parser.add_argument(
+        '-r', '--rate',
+        type=float,
+        default=2.0,
+        help='Average time between request batches in seconds (default: 2.0)'
+    )
+    parser.add_argument(
+        '-c', '--concurrent',
+        type=int,
+        default=10,
+        help='Maximum concurrent requests (default: 10)'
+    )
+    parser.add_argument(
+        '-t', '--timeout',
+        type=float,
+        default=10.0,
+        help='Request timeout in seconds (default: 10.0)'
+    )
+    parser.add_argument(
+        '--no-realistic-delays',
+        action='store_true',
+        help='Disable realistic human-like delays between requests'
+    )
+    parser.add_argument(
+        '--debug',
+        action='store_true',
+        help='Enable debug logging'
+    )
+    
+    args = parser.parse_args()
+    
+    # Update logging level if debug mode
+    if args.debug:
+        logging.getLogger().setLevel(logging.DEBUG)
+    
+    simulator = APITrafficSimulator(
+        base_url=args.url,
+        max_concurrent_requests=args.concurrent,
+        timeout=args.timeout,
+        realistic_delays=not args.no_realistic_delays
+    )
     
     try:
+        # Run simulation
         await simulator.simulate_traffic(
-            duration=300,  # 5 minutes of simulation
-            request_frequency=2.0  # Average 2 seconds between request batches
+            duration=args.duration,
+            request_frequency=args.rate
         )
         
-        # Print summary report
-        print(simulator.generate_summary_report())
+        # Generate and display report
+        report = simulator.generate_summary_report()
+        print(report)
         
-        # Optional: Write report to file
-        with open('traffic_simulation_report.txt', 'w') as f:
-            f.write(simulator.generate_summary_report())
-    
+        # Save report to file
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        report_file = f'traffic_simulation_report_{timestamp}.txt'
+        with open(report_file, 'w') as f:
+            # Strip ANSI codes for file output
+            import re
+            ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+            clean_report = ansi_escape.sub('', report)
+            f.write(clean_report)
+        
+        print(f"{Colors.OKGREEN}Report saved to: {Colors.BOLD}{report_file}{Colors.ENDC}")
+        
+    except KeyboardInterrupt:
+        print(f"\n{Colors.WARNING}Simulation interrupted by user{Colors.ENDC}")
+        return 130  # Standard exit code for SIGINT
     except Exception as e:
-        print(f"Simulation error: {e}")
+        print(f"{Colors.FAIL}Simulation error: {e}{Colors.ENDC}")
+        import traceback
+        if args.debug:
+            traceback.print_exc()
+        return 1
+    
+    return 0
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    sys.exit(asyncio.run(main()))
