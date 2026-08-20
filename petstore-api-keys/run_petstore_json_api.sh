@@ -32,6 +32,12 @@ readonly PARALLEL=${SIM_PARALLEL:-3}
 readonly MIN_PETS=${SIM_MIN_PETS:-10}
 readonly MIN_USERS=${SIM_MIN_USERS:-10}
 
+# User agent used for our own curl/preflight checks. Must NOT contain the
+# string "python": the account-level Cloudflare WAF custom rule blocks it,
+# which surfaces as a confusing 403 on every request. Keep it identifiable so
+# this demo traffic is easy to spot in Cloudflare logs.
+readonly DEMO_UA="petstore-demo-runner/1.0"
+
 # API endpoints
 readonly PETSTORE_URL="https://petstore.automatic-demo.com/api/v3/"
 readonly JSON_API_URL="https://json.dlsdemo.com"
@@ -75,6 +81,81 @@ check_command() {
         return 1
     fi
     return 0
+}
+
+setup_tls_trust() {
+    # WARP may or may not be connected. Rather than detect it, just try the
+    # default trust store first and only merge the system roots if that fails.
+    if tls_probe; then
+        print_success "TLS verifies with default trust store (no inspection active)"
+        return 0
+    fi
+
+    # Failed: a TLS-inspecting proxy (Cloudflare WARP / Zero Trust Gateway) is
+    # re-signing connections with a root that lives in the macOS keychain.
+    # curl and browsers trust it; Python trusts only certifi's bundle. Merge.
+    print_info "TLS verification failed - checking for an inspecting proxy..."
+
+    local ca_bundle certifi_pem extra_roots
+    ca_bundle="${PWD}/${VENV_DIR}/etc/ca-bundle.pem"
+
+    certifi_pem=$(python -c 'import certifi; print(certifi.where())' 2>/dev/null) || {
+        print_warning "certifi unavailable; leaving TLS trust at defaults"
+        return 0
+    }
+
+    extra_roots=$(security find-certificate -a -p /Library/Keychains/System.keychain 2>/dev/null || true)
+    if [ -z "$extra_roots" ]; then
+        print_warning "No extra system roots found; cannot repair TLS trust"
+        return 0
+    fi
+
+    mkdir -p "$(dirname "$ca_bundle")"
+    cat "$certifi_pem" > "$ca_bundle"
+    printf '%s\n' "$extra_roots" >> "$ca_bundle"
+
+    export SSL_CERT_FILE="$ca_bundle"
+    export REQUESTS_CA_BUNDLE="$ca_bundle"
+
+    if tls_probe; then
+        print_success "TLS inspection detected (e.g. Cloudflare WARP) - merged system roots into CA bundle"
+        print_info "$(grep -c 'BEGIN CERTIFICATE' "$ca_bundle") certs -> ${ca_bundle}"
+    else
+        print_warning "Merged system roots but TLS still failing"
+    fi
+}
+
+# Single TLS reachability probe against the JSON endpoint. Returns 0 if the
+# handshake verifies. Uses DEMO_UA so the WAF never sees a "python" agent.
+tls_probe() {
+    python - "$JSON_API_URL" "$DEMO_UA" <<'PYSSL' 2>/dev/null
+import sys, httpx
+try:
+    httpx.get(sys.argv[1], timeout=10, headers={"User-Agent": sys.argv[2]})
+except Exception:
+    sys.exit(1)
+sys.exit(0)
+PYSSL
+}
+
+preflight_check() {
+    # Fail fast. Without this the simulators run the full duration while every
+    # request errors out, and the script still prints "COMPLETED SUCCESSFULLY".
+    python - "$PETSTORE_URL" "$JSON_API_URL" "$DEMO_UA" <<'PYSSL'
+import sys, httpx
+*urls, ua = sys.argv[1:]
+ok = True
+for url in urls:
+    try:
+        r = httpx.get(url, timeout=15, follow_redirects=True,
+                      headers={"User-Agent": ua})
+        note = "  (WAF block?)" if r.status_code == 403 else ""
+        print("  reachable (%s)%s: %s" % (r.status_code, note, url))
+    except Exception as e:
+        ok = False
+        print("  UNREACHABLE: %s\n    %s: %s" % (url, type(e).__name__, e))
+sys.exit(0 if ok else 1)
+PYSSL
 }
 
 cleanup() {
@@ -131,13 +212,24 @@ main() {
     print_section "Prerequisites Check"
     
     local prereqs_ok=true
-    for cmd in python3 pip; do
-        if check_command "$cmd"; then
-            print_success "$cmd found"
-        else
-            prereqs_ok=false
-        fi
-    done
+
+    if check_command python3; then
+        print_success "python3 found ($(python3 -V 2>&1))"
+    else
+        prereqs_ok=false
+    fi
+
+    # NOTE: we deliberately do not require a global `pip` command. Homebrew (and
+    # python.org) only install `pip3`, and pip is provided by the virtual
+    # environment created below anyway. What we actually need is python3's venv
+    # support (which bootstraps pip inside the venv via ensurepip).
+    if python3 -m venv --help &> /dev/null; then
+        print_success "python3 venv module available"
+    else
+        print_error "python3 is missing the 'venv' module"
+        print_info "On macOS/Homebrew: brew install python"
+        prereqs_ok=false
+    fi
     
     if [ "$prereqs_ok" = false ]; then
         print_error "Missing required commands. Please install them first."
@@ -185,11 +277,11 @@ main() {
     # Install/upgrade dependencies
     print_section "Dependencies Installation"
     print_info "Upgrading pip..."
-    pip install --upgrade pip --quiet
+    python -m pip install --upgrade pip --quiet
     print_success "pip upgraded"
     
     print_info "Installing required packages..."
-    pip install --quiet \
+    python -m pip install --quiet \
         "httpx[http2]" \
         authlib \
         cryptography \
@@ -198,6 +290,20 @@ main() {
         exit 1
     }
     print_success "All packages installed"
+    
+    # Configure TLS trust (handles TLS-inspecting proxies such as WARP)
+    print_section "TLS Trust Setup"
+    setup_tls_trust
+    
+    # Verify endpoints resolve and verify before burning the whole run
+    print_section "Connectivity Preflight"
+    if preflight_check; then
+        print_success "All endpoints reachable"
+    else
+        print_error "One or more endpoints unreachable - aborting"
+        print_info "Simulators would otherwise run the full ${DURATION} min at a 0% success rate"
+        exit 1
+    fi
     
     # Verify scripts exist
     print_section "Script Verification"
@@ -241,7 +347,12 @@ main() {
     
     # Start JSON API simulator
     print_info "Starting JSON API simulator..."
+    # This simulator takes its duration in SECONDS and defaults to 300 (5 min).
+    # Pass the configured URL and match the Petstore run window so both
+    # simulators finish together.
     python traffic-simulator-json-api.py \
+        --url "$JSON_API_URL" \
+        --duration "$((DURATION * 60))" \
         > "${LOG_DIR}/json_api_${TIMESTAMP}.log" 2>&1 &
     
     JSON_API_PID=$!
